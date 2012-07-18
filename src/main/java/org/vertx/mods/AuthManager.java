@@ -16,10 +16,13 @@
 
 package org.vertx.mods;
 
+import org.mindrot.jbcrypt.BCrypt;
 import org.vertx.java.busmods.BusModBase;
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.eventbus.Message;
 import org.vertx.java.core.json.JsonObject;
+
+import sun.nio.cs.ext.DBCS_IBM_EBCDIC_Decoder;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -36,6 +39,8 @@ public class AuthManager extends BusModBase {
   private Handler<Message<JsonObject>> loginHandler;
   private Handler<Message<JsonObject>> logoutHandler;
   private Handler<Message<JsonObject>> authoriseHandler;
+  private Handler<Message<JsonObject>> createHandler;
+  private Handler<Message<JsonObject>> existsHandler;
 
   protected final Map<String, String> sessions = new HashMap<>();
   protected final Map<String, LoginInfo> logins = new HashMap<>();
@@ -95,6 +100,18 @@ public class AuthManager extends BusModBase {
       }
     };
     eb.registerHandler(address + ".authorise", authoriseHandler);
+    createHandler = new Handler<Message<JsonObject>>() {
+      public void handle(Message<JsonObject> message) {
+        doCreate(message);
+      }
+    };
+    eb.registerHandler(address + ".create", createHandler);
+    existsHandler = new Handler<Message<JsonObject>>() {
+      public void handle(Message<JsonObject> message) {
+        doExists(message);
+      }
+    };
+    eb.registerHandler(address + ".exists", existsHandler);
   }
 
   private void doLogin(final Message<JsonObject> message) {
@@ -103,39 +120,47 @@ public class AuthManager extends BusModBase {
     if (username == null) {
       return;
     }
-    String password = getMandatoryString("password", message);
+    final String password = getMandatoryString("password", message);
     if (password == null) {
       return;
     }
 
     JsonObject findMsg = new JsonObject().putString("action", "findone").putString("collection", userCollection);
-    JsonObject matcher = new JsonObject().putString("username", username).putString("password", password);
+    JsonObject matcher = new JsonObject().putString("username", username);
     findMsg.putObject("matcher", matcher);
 
     eb.send(persistorAddress, findMsg, new Handler<Message<JsonObject>>() {
       public void handle(Message<JsonObject> reply) {
 
         if (reply.body.getString("status").equals("ok")) {
-          if (reply.body.getObject("result") != null) {
+          JsonObject user = reply.body.getObject("result");
+          if (user != null) {
 
-            // Check if already logged in, if so logout of the old session
-            LoginInfo info = logins.get(username);
-            if (info != null) {
-              logout(info.sessionID);
-            }
-
-            // Found
-            final String sessionID = UUID.randomUUID().toString();
-            long timerID = vertx.setTimer(sessionTimeout, new Handler<Long>() {
-              public void handle(Long timerID) {
-                sessions.remove(sessionID);
-                logins.remove(username);
+            // Check if password matches
+            String hashedPassword = user.getString("password");
+            if (!BCrypt.checkpw(password, hashedPassword)) {
+              sendStatus("denied", message);
+            } else {
+              
+              // Check if already logged in, if so logout of the old session
+              LoginInfo info = logins.get(username);
+              if (info != null) {
+                logout(info.sessionID);
               }
-            });
-            sessions.put(sessionID, username);
-            logins.put(username, new LoginInfo(timerID, sessionID));
-            JsonObject jsonReply = new JsonObject().putString("sessionID", sessionID);
-            sendOK(message, jsonReply);
+  
+              // Found
+              final String sessionID = UUID.randomUUID().toString();
+              long timerID = vertx.setTimer(sessionTimeout, new Handler<Long>() {
+                public void handle(Long timerID) {
+                  sessions.remove(sessionID);
+                  logins.remove(username);
+                }
+              });
+              sessions.put(sessionID, username);
+              logins.put(username, new LoginInfo(timerID, sessionID));
+              JsonObject jsonReply = new JsonObject().putString("sessionID", sessionID);
+              sendOK(message, jsonReply);
+            }
           } else {
             // Not found
             sendStatus("denied", message);
@@ -186,6 +211,61 @@ public class AuthManager extends BusModBase {
     } else {
       sendStatus("denied", message);
     }
+  }
+
+  protected void doCreate(final Message<JsonObject> message) {
+    final String name = getMandatoryString("name", message);
+    final String username = getMandatoryString("username", message);
+    final String password = getMandatoryString("password", message);
+    if (username == null || password == null || name == null) {
+      return;
+    }
+    
+    eb.send(address + ".exists", new JsonObject().putString("username", username), new Handler<Message<JsonObject>>() {
+      @Override
+      public void handle(Message<JsonObject> existsReply) {
+        String existsStatus = existsReply.body.getString("status");
+        if ("error".equals(existsStatus)) {
+          logger.error("Failed to check for preexistence during create: " + existsReply.body.getString("message"));
+          sendError(message, "Failed to check for preexistence during create");
+        } else if ("ok".equals(existsStatus)) {
+          sendStatus("duplicate", message);
+        } else if ("not found".equals(existsStatus)) {
+          // No existing user, create
+          
+          
+        } else {
+          sendError(message, "Unknown status from exists check during create: " + existsStatus);
+        }
+      }
+    });
+  }
+  
+  protected void doExists(final Message<JsonObject> message) {
+    final String username = getMandatoryString("username", message);
+    if (username == null) {
+      return;
+    }
+    
+    JsonObject findMsg = new JsonObject().putString("action", "findone").putString("collection", userCollection);
+    JsonObject matcher = new JsonObject().putString("username", username);
+    findMsg.putObject("matcher", matcher);
+
+    eb.send(persistorAddress, findMsg, new Handler<Message<JsonObject>>() {
+      public void handle(Message<JsonObject> reply) {
+        if (reply.body.getString("status").equals("ok")) {
+          JsonObject user = reply.body.getObject("result");
+          if (user != null) {
+            sendOK(message);
+          } else {
+            sendStatus("not found", message);
+          }
+        } else {
+          logger.error("Failed to execute exists query: " + reply.body.getString("message"));
+          sendError(message, "Failed to execute exists");
+        }
+      }
+    });
   }
 
 
