@@ -27,6 +27,7 @@ buildscript {
 
 apply from: 'gradle/setup.gradle'
 apply plugin: 'java'
+apply plugin: 'eclipse'
 apply plugin: 'vertx' // configures the test classpath correctly and adds busmod packaging
 apply plugin: 'vertx-rhino'
 
@@ -43,6 +44,8 @@ repositories {
 dependencies {
   vertxProvided("org.vert-x:vertx-core:$vertxVersion")
   vertxProvided("org.vert-x:vertx-platform:$vertxVersion")
+
+  compile("org.mindrot:jbcrypt:0.3m")
 
   testCompile("org.vert-x:vertx-core:$vertxVersion")
   testCompile("org.vert-x:vertx-platform:$vertxVersion")
