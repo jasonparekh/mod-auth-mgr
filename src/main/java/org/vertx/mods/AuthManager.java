@@ -16,18 +16,19 @@
 
 package org.vertx.mods;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+
 import org.mindrot.jbcrypt.BCrypt;
 import org.vertx.java.busmods.BusModBase;
 import org.vertx.java.core.Handler;
 import org.vertx.java.core.eventbus.Message;
 import org.vertx.java.core.json.JsonObject;
 
-import sun.nio.cs.ext.DBCS_IBM_EBCDIC_Decoder;
-
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
-
+// TODO persist session IDs
+// TODO reset password
+// TODO email verification
 /**
  * Basic Authentication Manager Bus Module<p>
  * Please see the busmods manual for a full description<p>
@@ -142,22 +143,7 @@ public class AuthManager extends BusModBase {
               sendStatus("denied", message);
             } else {
               
-              // Check if already logged in, if so logout of the old session
-              LoginInfo info = logins.get(username);
-              if (info != null) {
-                logout(info.sessionID);
-              }
-  
-              // Found
-              final String sessionID = UUID.randomUUID().toString();
-              long timerID = vertx.setTimer(sessionTimeout, new Handler<Long>() {
-                public void handle(Long timerID) {
-                  sessions.remove(sessionID);
-                  logins.remove(username);
-                }
-              });
-              sessions.put(sessionID, username);
-              logins.put(username, new LoginInfo(timerID, sessionID));
+              String sessionID = createSession(username);
               JsonObject jsonReply = new JsonObject().putString("sessionID", sessionID);
               sendOK(message, jsonReply);
             }
@@ -173,6 +159,26 @@ public class AuthManager extends BusModBase {
     });
   }
 
+  private String createSession(final String username) {
+    // Check if already logged in, if so logout of the old session
+    LoginInfo info = logins.get(username);
+    if (info != null) {
+      logout(info.sessionID);
+    }
+ 
+    // Found
+    final String sessionID = UUID.randomUUID().toString();
+    long timerID = vertx.setTimer(sessionTimeout, new Handler<Long>() {
+      public void handle(Long timerID) {
+        sessions.remove(sessionID);
+        logins.remove(username);
+      }
+    });
+    sessions.put(sessionID, username);
+    logins.put(username, new LoginInfo(timerID, sessionID));
+    return sessionID;
+  }
+  
   protected void doLogout(final Message<JsonObject> message) {
     final String sessionID = getMandatoryString("sessionID", message);
     if (sessionID != null) {
@@ -221,21 +227,21 @@ public class AuthManager extends BusModBase {
       return;
     }
     
-    eb.send(address + ".exists", new JsonObject().putString("username", username), new Handler<Message<JsonObject>>() {
+    // TODO We depend on DB to prevent duplicates
+    String hashedPassword = BCrypt.hashpw(password, BCrypt.gensalt());
+    JsonObject user = new JsonObject().putString("username", username)
+        .putString("password", hashedPassword).putString("name", name);
+    JsonObject saveMsg = new JsonObject().putString("action", "save")
+        .putString("collection", userCollection).putObject("document", user);
+    eb.send(persistorAddress, saveMsg, new Handler<Message<JsonObject>>() {
       @Override
-      public void handle(Message<JsonObject> existsReply) {
-        String existsStatus = existsReply.body.getString("status");
-        if ("error".equals(existsStatus)) {
-          logger.error("Failed to check for preexistence during create: " + existsReply.body.getString("message"));
-          sendError(message, "Failed to check for preexistence during create");
-        } else if ("ok".equals(existsStatus)) {
-          sendStatus("duplicate", message);
-        } else if ("not found".equals(existsStatus)) {
-          // No existing user, create
-          
-          
+      public void handle(Message<JsonObject> saveReply) {
+        if (saveReply.body.getString("status").equals("ok")) {
+          String sessionID = createSession(username);
+          sendOK(message, new JsonObject().putString("sessionID", sessionID));
         } else {
-          sendError(message, "Unknown status from exists check during create: " + existsStatus);
+          logger.error("Failed to execute create query: " + saveReply.body.getString("message"));
+          sendError(message, "Failed to excecute create");
         }
       }
     });
